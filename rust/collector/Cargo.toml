@@ -1,0 +1,16 @@
+[package]
+name = "collector"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Console",
+] }
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+chrono = "0.4"
