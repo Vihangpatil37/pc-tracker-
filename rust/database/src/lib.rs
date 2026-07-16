@@ -1,10 +1,14 @@
 pub use sqlx::SqlitePool;
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::sqlite::{SqlitePoolOptions, SqliteConnectOptions};
+use std::str::FromStr;
 
 pub async fn create_pool(path: &str) -> Result<SqlitePool, sqlx::Error> {
+    let connect_options = SqliteConnectOptions::from_str(path)?
+        .create_if_missing(true);
+
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
-        .connect(path)
+        .connect_with(connect_options)
         .await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
     Ok(pool)

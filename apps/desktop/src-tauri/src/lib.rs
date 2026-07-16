@@ -26,8 +26,11 @@ pub fn run() {
         .with_ansi(false)
         .init();
 
+    let db_path = log_dir.parent().unwrap().join("focus_os.db");
+    let db_url = format!("sqlite://{}", db_path.to_str().unwrap().replace("\\", "/"));
+
     let pool = tauri::async_runtime::block_on(async {
-        database::create_pool("focus_os.db").await
+        database::create_pool(&db_url).await
     })
     .expect("failed to create database pool");
 
