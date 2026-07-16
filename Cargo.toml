@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "rust/collector",
+    "rust/session",
+    "rust/idle",
+    "rust/database",
+    "apps/desktop/src-tauri",
+]
+resolver = "2"
