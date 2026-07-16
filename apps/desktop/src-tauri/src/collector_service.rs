@@ -73,173 +73,179 @@ impl CollectorService {
         let running = self.running.clone();
         let pool = self.pool.clone();
         let current_session = self.current_session.clone();
-        async_runtime::spawn(async move {
-            let mut session_mgr = session::SessionManager::new();
-            let mut idle_detector = idle::IdleDetector::new();
-            let mut idle_open: Option<i64> = None;
-            let mut was_locked = false;
-            let mut sleep_polls: u32 = 0;
-            let mut was_sleeping = false;
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime for collector");
+            rt.block_on(async move {
+                let mut session_mgr = session::SessionManager::new();
+                let mut idle_detector = idle::IdleDetector::new();
+                let mut idle_open: Option<i64> = None;
+                let mut was_locked = false;
+                let mut sleep_polls: u32 = 0;
+                let mut was_sleeping = false;
 
-            // Log BOOT event on first start
-            let boot_time = chrono::Utc::now().timestamp();
-            if let Err(e) = database::insert_system_event(&pool, "BOOT", boot_time, None).await {
-                tracing::error!(error = %e, "failed to persist boot event");
-            }
-            tracing::info!("collector service started");
+                // Log BOOT event on first start
+                let boot_time = chrono::Utc::now().timestamp();
+                if let Err(e) = database::insert_system_event(&pool, "BOOT", boot_time, None).await {
+                    tracing::error!(error = %e, "failed to persist boot event");
+                }
+                tracing::info!("collector service started");
 
-            while running.load(Ordering::SeqCst) {
-                let now = chrono::Utc::now().timestamp();
+                while running.load(Ordering::SeqCst) {
+                    let now = chrono::Utc::now().timestamp();
 
-                // --- System event detection ---
+                    // --- System event detection ---
 
-                // Lock/unlock detection via OpenInputDesktop
-                let locked = is_workstation_locked();
-                if locked && !was_locked {
-                    tracing::info!("system lock detected");
-                    if let Some(record) = session_mgr.close_current(now) {
-                        tracing::info!(
-                            app = %record.exe_name,
-                            duration_s = ?record.duration_seconds,
-                            "Session closed on lock"
-                        );
-                        if let Err(e) = persist_session(&pool, &record).await {
-                            tracing::error!(error = %e, "failed to persist session on lock");
+                    // Lock/unlock detection via OpenInputDesktop
+                    let locked = is_workstation_locked();
+                    if locked && !was_locked {
+                        tracing::info!("system lock detected");
+                        if let Some(record) = session_mgr.close_current(now) {
+                            tracing::info!(
+                                app = %record.exe_name,
+                                duration_s = ?record.duration_seconds,
+                                "Session closed on lock"
+                            );
+                            if let Err(e) = persist_session(&pool, &record, None).await {
+                                tracing::error!(error = %e, "failed to persist session on lock");
+                            }
                         }
-                    }
-                    if let Err(e) = database::insert_system_event(&pool, "LOCK", now, None).await {
-                        tracing::error!(error = %e, "failed to persist lock event");
-                    }
-                    was_locked = true;
-                } else if !locked && was_locked {
-                    tracing::info!("system unlock detected");
-                    if let Err(e) = database::insert_system_event(&pool, "UNLOCK", now, None).await {
-                        tracing::error!(error = %e, "failed to persist unlock event");
-                    }
-                    // Reset idle state on unlock (user may have been away)
-                    idle_detector = idle::IdleDetector::new();
-                    idle_open = None;
-                    was_locked = false;
-                }
-
-                // Sleep/wake detection: 3 consecutive NULL foreground window = sleeping
-                // (The foreground window handle is NULL when the desktop is not visible,
-                // e.g. during sleep, screen saver, or fast user switch.)
-                if is_foreground_null() {
-                    sleep_polls += 1;
-                } else {
-                    sleep_polls = 0;
-                }
-
-                let sleeping = sleep_polls >= 3;
-                if sleeping && !was_sleeping {
-                    tracing::info!("system sleep detected");
-                    if let Some(record) = session_mgr.close_current(now) {
-                        tracing::info!(
-                            app = %record.exe_name,
-                            duration_s = ?record.duration_seconds,
-                            "Session closed on sleep"
-                        );
-                        if let Err(e) = persist_session(&pool, &record).await {
-                            tracing::error!(error = %e, "failed to persist session on sleep");
+                        if let Err(e) = database::insert_system_event(&pool, "LOCK", now, None).await {
+                            tracing::error!(error = %e, "failed to persist lock event");
                         }
+                        was_locked = true;
+                    } else if !locked && was_locked {
+                        tracing::info!("system unlock detected");
+                        if let Err(e) = database::insert_system_event(&pool, "UNLOCK", now, None).await {
+                            tracing::error!(error = %e, "failed to persist unlock event");
+                        }
+                        // Reset idle state on unlock (user may have been away)
+                        idle_detector = idle::IdleDetector::new();
+                        idle_open = None;
+                        was_locked = false;
                     }
-                    if let Err(e) = database::insert_system_event(&pool, "SLEEP", now, None).await {
-                        tracing::error!(error = %e, "failed to persist sleep event");
-                    }
-                    was_sleeping = true;
-                } else if !sleeping && was_sleeping {
-                    tracing::info!("system wake detected");
-                    if let Err(e) = database::insert_system_event(&pool, "WAKE", now, None).await {
-                        tracing::error!(error = %e, "failed to persist wake event");
-                    }
-                    was_sleeping = false;
-                }
 
-                // --- Activity collection (skip if locked or sleeping) ---
-                if !locked && !sleeping {
-                    if let Some(sample) = collector::sample_current() {
-                        match session_mgr.try_merge_heartbeat(&sample) {
-                            MergeResult::Switched(record) => {
-                                tracing::info!(
-                                    app = %record.exe_name,
-                                    start = record.started_at,
-                                    end = ?record.ended_at,
-                                    duration_s = ?record.duration_seconds,
-                                    "Session switch: {} for {}s",
-                                    record.exe_name,
-                                    record.duration_seconds.unwrap_or(0),
-                                );
-                                if let Err(e) = persist_session(&pool, &record).await {
-                                    tracing::error!(error = %e, "failed to persist session");
+                    // Sleep/wake detection: 3 consecutive NULL foreground window = sleeping
+                    // (The foreground window handle is NULL when the desktop is not visible,
+                    // e.g. during sleep, screen saver, or fast user switch.)
+                    if is_foreground_null() {
+                        sleep_polls += 1;
+                    } else {
+                        sleep_polls = 0;
+                    }
+
+                    let sleeping = sleep_polls >= 3;
+                    if sleeping && !was_sleeping {
+                        tracing::info!("system sleep detected");
+                        if let Some(record) = session_mgr.close_current(now) {
+                            tracing::info!(
+                                app = %record.exe_name,
+                                duration_s = ?record.duration_seconds,
+                                "Session closed on sleep"
+                            );
+                            if let Err(e) = persist_session(&pool, &record, None).await {
+                                tracing::error!(error = %e, "failed to persist session on sleep");
+                            }
+                        }
+                        if let Err(e) = database::insert_system_event(&pool, "SLEEP", now, None).await {
+                            tracing::error!(error = %e, "failed to persist sleep event");
+                        }
+                        was_sleeping = true;
+                    } else if !sleeping && was_sleeping {
+                        tracing::info!("system wake detected");
+                        if let Err(e) = database::insert_system_event(&pool, "WAKE", now, None).await {
+                            tracing::error!(error = %e, "failed to persist wake event");
+                        }
+                        was_sleeping = false;
+                    }
+
+                    // --- Activity collection (skip if locked or sleeping) ---
+                    if !locked && !sleeping {
+                        if let Some(sample) = collector::sample_current() {
+                            match session_mgr.try_merge_heartbeat(&sample) {
+                                MergeResult::Switched(record) => {
+                                    let open_apps = collector::enum_open_windows();
+                                    let open_json = serde_json::to_string(&open_apps.iter().map(|(e, _, _)| e).collect::<Vec<_>>()).ok();
+
+                                    tracing::info!(
+                                        app = %record.exe_name,
+                                        start = record.started_at,
+                                        end = ?record.ended_at,
+                                        duration_s = ?record.duration_seconds,
+                                        "Session switch: {} for {}s",
+                                        record.exe_name,
+                                        record.duration_seconds.unwrap_or(0),
+                                    );
+                                    if let Err(e) = persist_session(&pool, &record, open_json).await {
+                                        tracing::error!(error = %e, "failed to persist session");
+                                    }
+                                }
+                                MergeResult::Merged => {
+                                    // Heartbeat merged — no DB write, as designed
+                                }
+                                MergeResult::NoSession => {
+                                    tracing::info!(
+                                        app = %sample.exe_name,
+                                        "New session started"
+                                    );
                                 }
                             }
-                            MergeResult::Merged => {
-                                // Heartbeat merged — no DB write, as designed
-                            }
-                            MergeResult::NoSession => {
-                                tracing::info!(
-                                    app = %sample.exe_name,
-                                    "New session started"
-                                );
-                            }
                         }
                     }
-                }
 
-                // --- Update current session state for frontend ---
-                if let Some(cur) = session_mgr.current_session() {
-                    if let Ok(mut state) = current_session.lock() {
-                        let duration = now - cur.started_at;
-                        state.app_name = Some(cur.exe_name.clone());
-                        state.window_title = cur.window_title.clone();
-                        state.started_at = Some(cur.started_at);
-                        state.duration_seconds = duration;
-                    }
-                } else {
-                    if let Ok(mut state) = current_session.lock() {
-                        state.app_name = None;
-                        state.window_title = None;
-                        state.started_at = None;
-                        state.duration_seconds = 0;
-                    }
-                }
-
-                // --- Idle detection (only when not locked/sleeping) ---
-                if !locked && !sleeping {
-                    match idle_detector.tick(now) {
-                        IdleState::Idle { since } if idle_open.is_none() => {
-                            tracing::info!(idle_start = since, "idle started");
-                            session_mgr.handle_idle_start(now);
-                            idle_open = Some(since);
+                    // --- Update current session state for frontend ---
+                    if let Some(cur) = session_mgr.current_session() {
+                        if let Ok(mut state) = current_session.lock() {
+                            let duration = now - cur.started_at;
+                            state.app_name = Some(cur.exe_name.clone());
+                            state.window_title = cur.window_title.clone();
+                            state.started_at = Some(cur.started_at);
+                            state.duration_seconds = duration;
                         }
-                        IdleState::Active if idle_open.is_some() => {
-                            let start = idle_open.take().unwrap();
-                            let duration = now - start;
-                            tracing::info!(idle_duration_s = duration, "idle ended");
-                            session_mgr.handle_idle_end(now);
-                            if let Err(e) =
-                                database::insert_idle_event(&pool, start, now, duration).await
-                            {
-                                tracing::error!(error = %e, "failed to persist idle event");
+                    } else {
+                        if let Ok(mut state) = current_session.lock() {
+                            state.app_name = None;
+                            state.window_title = None;
+                            state.started_at = None;
+                            state.duration_seconds = 0;
+                        }
+                    }
+
+                    // --- Idle detection (only when not locked/sleeping) ---
+                    if !locked && !sleeping {
+                        match idle_detector.tick(now) {
+                            IdleState::Idle { since } if idle_open.is_none() => {
+                                tracing::info!(idle_start = since, "idle started");
+                                session_mgr.handle_idle_start(now);
+                                idle_open = Some(since);
                             }
+                            IdleState::Active if idle_open.is_some() => {
+                                let start = idle_open.take().unwrap();
+                                let duration = now - start;
+                                tracing::info!(idle_duration_s = duration, "idle ended");
+                                session_mgr.handle_idle_end(now);
+                                if let Err(e) =
+                                    database::insert_idle_event(&pool, start, now, duration).await
+                                {
+                                    tracing::error!(error = %e, "failed to persist idle event");
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
+                    } else if idle_open.is_some() {
+                        // If we were idle when lock/sleep hit, clear it
+                        idle_open = None;
                     }
-                } else if idle_open.is_some() {
-                    // If we were idle when lock/sleep hit, clear it
-                    idle_open = None;
+
+                    sleep(Duration::from_secs(1)).await;
                 }
 
-                sleep(Duration::from_secs(1)).await;
-            }
-
-            // Log SHUTDOWN event when service stops
-            let shutdown_time = chrono::Utc::now().timestamp();
-            if let Err(e) = database::insert_system_event(&pool, "SHUTDOWN", shutdown_time, None).await {
-                tracing::error!(error = %e, "failed to persist shutdown event");
-            }
-            tracing::info!("collector service stopped");
+                // Log SHUTDOWN event when service stops
+                let shutdown_time = chrono::Utc::now().timestamp();
+                if let Err(e) = database::insert_system_event(&pool, "SHUTDOWN", shutdown_time, None).await {
+                    tracing::error!(error = %e, "failed to persist shutdown event");
+                }
+                tracing::info!("collector service stopped");
+            });
         });
     }
 
@@ -248,7 +254,7 @@ impl CollectorService {
     }
 }
 
-async fn persist_session(pool: &SqlitePool, record: &session::SessionRecord) -> Result<(), sqlx::Error> {
+async fn persist_session(pool: &SqlitePool, record: &session::SessionRecord, open_apps_json: Option<String>) -> Result<(), sqlx::Error> {
     let app_id = database::upsert_app(pool, &record.exe_name).await?;
     database::insert_session(
         pool,
@@ -259,6 +265,7 @@ async fn persist_session(pool: &SqlitePool, record: &session::SessionRecord) -> 
         record.duration_seconds.unwrap_or(0),
         record.idle_seconds,
         record.productive_seconds.unwrap_or(0),
+        open_apps_json.as_deref(),
     )
     .await?;
     Ok(())
