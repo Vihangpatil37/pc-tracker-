@@ -63,6 +63,34 @@ pub fn get_process_name(pid: u32) -> Option<String> {
     }
 }
 
+pub fn enum_open_windows() -> Vec<(String, Option<String>, u32)> {
+    let mut windows: Vec<(String, Option<String>, u32)> = Vec::new();
+    unsafe {
+        let _ = EnumWindows(
+            Some(enum_window_callback),
+            LPARAM(&mut windows as *mut _ as isize),
+        );
+    }
+    windows
+}
+
+unsafe extern "system" fn enum_window_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let windows = &mut *(lparam.0 as *mut Vec<(String, Option<String>, u32)>);
+    if IsWindowVisible(hwnd).as_bool() {
+        let title = get_window_title(hwnd);
+        if title.as_deref().unwrap_or("").len() > 0 {
+            let mut pid: u32 = 0;
+            let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid != 0 {
+                if let Some(exe) = get_process_name(pid) {
+                    windows.push((exe, title, pid));
+                }
+            }
+        }
+    }
+    true.into()
+}
+
 pub fn sample_current() -> Option<ActivitySample> {
     let (hwnd, pid) = get_foreground_window_info()?;
     let exe_name = get_process_name(pid)?;

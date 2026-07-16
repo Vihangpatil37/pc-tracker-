@@ -45,9 +45,10 @@ pub async fn insert_session(
     duration: i64,
     idle: i64,
     productive: i64,
+    open_apps_json: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO sessions (app_id, window_title, started_at, ended_at, duration_seconds, idle_seconds, productive_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO sessions (app_id, window_title, started_at, ended_at, duration_seconds, idle_seconds, productive_seconds, open_apps_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
     )
     .bind(app_id)
     .bind(window_title)
@@ -56,6 +57,7 @@ pub async fn insert_session(
     .bind(duration)
     .bind(idle)
     .bind(productive)
+    .bind(open_apps_json)
     .execute(pool)
     .await?;
     Ok(())
@@ -252,7 +254,7 @@ mod tests {
         let pool = setup_test_db().await.unwrap();
         let app_id = upsert_app(&pool, "test.exe").await.unwrap();
         
-        insert_session(&pool, app_id, Some("Title"), 1000, 1100, 100, 10, 90).await.unwrap();
+        insert_session(&pool, app_id, Some("Title"), 1000, 1100, 100, 10, 90, None).await.unwrap();
         
         let (total_time, avg_time) = get_today_stats(&pool, 1000).await.unwrap();
         assert_eq!(total_time, 90);
@@ -285,8 +287,8 @@ mod tests {
         let app_id = upsert_app(&pool, "test.exe").await.unwrap();
         
         let date = 100000;
-        insert_session(&pool, app_id, Some("T1"), date, date + 100, 100, 0, 100).await.unwrap();
-        insert_session(&pool, app_id, Some("T2"), date + 200, date + 400, 200, 50, 150).await.unwrap();
+        insert_session(&pool, app_id, Some("T1"), date, date + 100, 100, 0, 100, None).await.unwrap();
+        insert_session(&pool, app_id, Some("T2"), date + 200, date + 400, 200, 50, 150, None).await.unwrap();
 
         let top_apps = get_top_apps(&pool, date, 7).await.unwrap();
         assert_eq!(top_apps.len(), 1);
