@@ -11,7 +11,7 @@ pub fn run() {
     
     std::fs::create_dir_all(&log_dir).ok();
 
-    let file_appender = tracing_appender::rolling::daily(log_dir, "focusos.log");
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "focusos.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     std::mem::forget(guard); // ensure the background thread lives forever
 

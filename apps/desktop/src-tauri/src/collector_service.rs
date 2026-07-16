@@ -3,6 +3,7 @@ use idle::IdleState;
 use session::MergeResult;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use tauri::async_runtime;
 use tokio::time::{sleep, Duration};
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
@@ -72,7 +73,7 @@ impl CollectorService {
         let running = self.running.clone();
         let pool = self.pool.clone();
         let current_session = self.current_session.clone();
-        tokio::spawn(async move {
+        async_runtime::spawn(async move {
             let mut session_mgr = session::SessionManager::new();
             let mut idle_detector = idle::IdleDetector::new();
             let mut idle_open: Option<i64> = None;
