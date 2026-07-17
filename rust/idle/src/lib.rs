@@ -8,8 +8,12 @@ struct LASTINPUTINFO {
     dw_time: u32,
 }
 
+#[link(name = "user32")]
 extern "system" {
     fn GetLastInputInfo(plii: *mut LASTINPUTINFO) -> i32;
+}
+
+extern "system" {
     fn GetTickCount() -> u32;
 }
 
