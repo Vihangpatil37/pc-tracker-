@@ -12,8 +12,7 @@ pub fn run() {
     std::fs::create_dir_all(&log_dir).ok();
 
     let file_appender = tracing_appender::rolling::daily(&log_dir, "focusos.log");
-    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-    std::mem::forget(guard); // ensure the background thread lives forever
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     // To print to stdout AND file, we use a combined writer
     // But since this is a GUI app, file-only is preferred for v1 release reliability.
@@ -25,6 +24,10 @@ pub fn run() {
         .with_writer(non_blocking)
         .with_ansi(false)
         .init();
+
+    std::panic::set_hook(Box::new(|info| {
+        tracing::error!("Panic occurred: {}", info);
+    }));
 
     let db_path = log_dir.parent().unwrap().join("focus_os.db");
     let db_url = format!("sqlite://{}", db_path.to_str().unwrap().replace("\\", "/"));
