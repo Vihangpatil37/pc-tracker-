@@ -4,12 +4,26 @@ mod commands;
 use tauri::Manager;
 
 pub fn run() {
+    std::panic::set_hook(Box::new(|info| {
+        tracing::error!("Panic occurred: {}", info);
+        #[cfg(target_os = "windows")]
+        {
+            use windows::core::HSTRING;
+            use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK, MB_ICONERROR};
+            let msg = HSTRING::from(format!("A fatal error occurred:\n{}", info));
+            let title = HSTRING::from("FocusOS Fatal Error");
+            unsafe {
+                let _ = MessageBoxW(None, &msg, &title, MB_OK | MB_ICONERROR);
+            }
+        }
+    }));
+
     let log_dir = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("FocusOS")
         .join("logs");
     
-    std::fs::create_dir_all(&log_dir).ok();
+    std::fs::create_dir_all(&log_dir).expect("Failed to create log directory");
 
     let file_appender = tracing_appender::rolling::daily(&log_dir, "focusos.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
@@ -25,12 +39,8 @@ pub fn run() {
         .with_ansi(false)
         .init();
 
-    std::panic::set_hook(Box::new(|info| {
-        tracing::error!("Panic occurred: {}", info);
-    }));
-
     let db_path = log_dir.parent().unwrap().join("focus_os.db");
-    let db_url = format!("sqlite://{}", db_path.to_str().unwrap().replace("\\", "/"));
+    let db_url = format!("sqlite:{}", db_path.to_str().unwrap());
 
     let pool = tauri::async_runtime::block_on(async {
         database::create_pool(&db_url).await
